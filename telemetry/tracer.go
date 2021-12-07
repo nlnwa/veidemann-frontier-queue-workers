@@ -17,26 +17,27 @@
 package telemetry
 
 import (
-	"github.com/opentracing/opentracing-go"
-	"github.com/uber/jaeger-client-go/config"
-	"github.com/uber/jaeger-client-go/log"
 	"io"
+
+	"github.com/opentracing/opentracing-go"
+	"github.com/uber/jaeger-client-go"
+	"github.com/uber/jaeger-client-go/config"
 )
 
 // InitTracer returns an instance of opentracing.Tracer and io.Closer.
-func InitTracer(service string) (opentracing.Tracer, io.Closer) {
+func InitTracer(service string, logger jaeger.Logger) (opentracing.Tracer, io.Closer) {
 	cfg, err := config.FromEnv()
 	if err != nil {
-		log.StdLogger.Infof("ERROR: cannot init Jaeger from environment: %v", err)
+		logger.Error(err.Error())
 		return nil, nil
 	}
 	if cfg.ServiceName == "" {
 		cfg.ServiceName = service
 	}
 
-	tracer, closer, err := cfg.NewTracer(config.Logger(log.StdLogger))
+	tracer, closer, err := cfg.NewTracer(config.Logger(logger))
 	if err != nil {
-		log.StdLogger.Infof("ERROR: cannot init Jaeger: %v", err)
+		logger.Error(err.Error())
 		return nil, nil
 	}
 	return tracer, closer

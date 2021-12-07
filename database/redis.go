@@ -18,86 +18,50 @@ package database
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/go-redis/redis"
-	frontierV1 "github.com/nlnwa/veidemann-api/go/frontier/v1"
-	"strconv"
-	"strings"
+	"github.com/rs/zerolog/log"
 )
 
-const (
-	RemoveUriQueue     = "REMURI"
-	JobExecutionPrefix = "JEID:"
-)
-
-type RedisClient struct {
-	*redis.Client
-}
-
-func NewRedisClient(host string, port int) (*RedisClient, error) {
+func NewRedisClient(host string, port int) (*redis.Client, error) {
+	addr := fmt.Sprintf("%s:%d", host, port)
 	client := redis.NewClient(&redis.Options{
-		Addr: fmt.Sprintf("%s:%d", host, port),
-		//Dialer:    nil,
-		//OnConnect: nil,
-		//MaxRetries:         0,
-		//MinRetryBackoff:    0,
-		//MaxRetryBackoff:    0,
-		//DialTimeout:        0,
-		//ReadTimeout:        0,
-		//WriteTimeout:       0,
-		//PoolSize:           0,
-		//MinIdleConns:       0,
-		//MaxConnAge:         0,
-		//PoolTimeout:        0,
-		//IdleTimeout:        0,
-		//IdleCheckFrequency: 0,
+		Addr:       addr,
+		MaxRetries: 3,
 	})
 
 	_, err := client.Ping().Result()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
 
-	return &RedisClient{Client: client}, nil
+	log.Info().Str("component", "redis").Msgf("Connected to Redis at %s", addr)
+
+	return client, err
 }
 
-func (r *RedisClient) GetJobExecutionStatuses() ([]*frontierV1.JobExecutionStatus, error) {
-	// Get all keys prefixed with "JEID:"
-	var jobExecutionKeys []string
-	err := r.Keys(JobExecutionPrefix + "*").ScanSlice(&jobExecutionKeys)
+func loadRedisScript(client *redis.Client, path string) (*redis.Script, error) {
+	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var jobExecutionStatuses []*frontierV1.JobExecutionStatus
-	for _, key := range jobExecutionKeys {
-		exists, err := r.Exists(key).Result()
-		if err != nil {
-			return nil, err
-		}
-		if exists == 0 {
-			continue
-		}
-		jeMap, err := r.HGetAll(key).Result()
-		if err != nil {
-			return nil, err
-		}
+	// create script
+	script := redis.NewScript(string(bytes))
 
-		jes := new(frontierV1.JobExecutionStatus)
-		jes.Id = strings.TrimPrefix(key, JobExecutionPrefix)
-		jes.DocumentsCrawled, _ = strconv.ParseInt(jeMap["documentsCrawled"], 10, 64)
-		jes.DocumentsDenied, _ = strconv.ParseInt(jeMap["documentsDenied"], 10, 64)
-		jes.DocumentsFailed, _ = strconv.ParseInt(jeMap["documentsFailed"], 10, 64)
-		jes.DocumentsOutOfScope, _ = strconv.ParseInt(jeMap["documentsOutOfScope"], 10, 64)
-		jes.DocumentsRetried, _ = strconv.ParseInt(jeMap["documentsRetried"], 10, 64)
-		jes.UrisCrawled, _ = strconv.ParseInt(jeMap["urisCrawled"], 10, 64)
-		jes.BytesCrawled, _ = strconv.ParseInt(jeMap["bytesCrawled"], 10, 64)
-		jes.ExecutionsState = make(map[string]int32, len(frontierV1.CrawlExecutionStatus_State_value))
-		for key, _ := range frontierV1.CrawlExecutionStatus_State_value {
-			v, _ := strconv.ParseInt(jeMap[key], 10, 32)
-			jes.ExecutionsState[key] = int32(v)
+	// load script if it doesn't exist in redis
+	boolSlice, err := script.Exists(client).Result()
+	if err != nil {
+		return nil, err
+	}
+	for _, exists := range boolSlice {
+		if !exists {
+			if err := script.Load(client).Err(); err != nil {
+				return nil, err
+			}
 		}
-		jobExecutionStatuses = append(jobExecutionStatuses, jes)
 	}
 
-	return jobExecutionStatuses, nil
+	return script, nil
 }

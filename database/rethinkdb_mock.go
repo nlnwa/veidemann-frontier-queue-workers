@@ -21,13 +21,13 @@ import (
 	"time"
 )
 
-type MockConnection struct {
+type RethinkDbMockConnection struct {
 	*RethinkDbConnection
 }
 
 // NewMockConnection creates a new mocked RethinkDbConnection object
-func NewMockConnection() *MockConnection {
-	return &MockConnection{
+func NewMockConnection() *RethinkDbMockConnection {
+	return &RethinkDbMockConnection{
 		RethinkDbConnection: &RethinkDbConnection{
 			connectOpts: r.ConnectOpts{
 				NumRetries: 10,
@@ -39,10 +39,10 @@ func NewMockConnection() *MockConnection {
 	}
 }
 
-func (c *MockConnection) Close() error {
+func (c *RethinkDbMockConnection) Close() error {
 	return nil
 }
 
-func (c *MockConnection) GetMock() *r.Mock {
+func (c *RethinkDbMockConnection) GetMock() *r.Mock {
 	return c.session.(*r.Mock)
 }

@@ -13,9 +13,11 @@ COPY . .
 # -ldflags arguments passed to go tool link:
 #   -s disable symbol table
 #   -w disable DWARF generation
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o app
 
 FROM gcr.io/distroless/base
-COPY --from=build /build/app /
+
+COPY --from=build /build/app /app
+COPY --from=build /build/lua /lua
 
 ENTRYPOINT ["/app"]

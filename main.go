@@ -17,48 +17,40 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"github.com/nlnwa/veidemann-frontier-workers/database"
-	"github.com/nlnwa/veidemann-frontier-workers/logger"
-	"github.com/nlnwa/veidemann-frontier-workers/telemetry"
-	"github.com/opentracing/opentracing-go"
-	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/nlnwa/veidemann-frontier-queue-workers/database"
+	"github.com/nlnwa/veidemann-frontier-queue-workers/logger"
+	"github.com/nlnwa/veidemann-frontier-queue-workers/telemetry"
+	"github.com/opentracing/opentracing-go"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"strings"
 )
 
 func main() {
-	pflag.String("interface", "", "interface the browser controller api listens to. No value means all interfaces.")
-	pflag.Int("port", 8080, "port the browser controller api listens to.")
-	pflag.String("host-name", "", "")
-	pflag.String("warc-dir", "", "")
-	pflag.String("warc-version", "1.1", "which WARC version to use for generated records. Allowed values: 1.0, 1.1")
-	pflag.Int("warc-writer-pool-size", 1, "")
-	pflag.Bool("flush-record", false, "if true, flush WARC-file to disk after each record.")
-	pflag.String("work-dir", "", "")
-	pflag.Int("termination-grace-period-seconds", 0, "")
-	pflag.Bool("strict-validation", false, "if true, use strict record validation")
-
-	pflag.String("db-host", "rethinkdb-proxy", "DB host")
-	pflag.Int("db-port", 28015, "DB port")
-	pflag.String("db-name", "veidemann", "DB name")
-	pflag.String("db-user", "", "Database username")
-	pflag.String("db-password", "", "Database password")
-	pflag.Duration("db-query-timeout", 1*time.Minute, "Database query timeout")
-	pflag.Int("db-max-retries", 5, "Max retries when database query fails")
-	pflag.Int("db-max-open-conn", 10, "Max open database connections")
-	pflag.Bool("db-use-opentracing", false, "Use opentracing for database queries")
+	pflag.String("db-host", "rethinkdb-proxy", "RethinkDB host")
+	pflag.Int("db-port", 28015, "RethinkDB port")
+	pflag.String("db-name", "veidemann", "RethinkDB database name")
+	pflag.String("db-user", "", "RethinkDB username")
+	pflag.String("db-password", "", "RethinkDB password")
+	pflag.Duration("db-query-timeout", 10*time.Second, "RethinkDB query timeout")
+	pflag.Int("db-max-retries", 3, "Max retries when query fails")
+	pflag.Int("db-max-open-conn", 10, "Max open connections")
+	pflag.Bool("db-use-opentracing", false, "Use opentracing for queries")
 
 	pflag.String("redis-host", "redis-veidemann-frontier-master", "Redis host")
 	pflag.Int("redis-port", 6379, "Redis port")
-
-
+	pflag.String("redis-script-path", "./lua", "Path to redis lua scripts")
 
 	pflag.String("log-level", "info", "log level, available levels are panic, fatal, error, warn, info, debug and trace")
 	pflag.String("log-formatter", "logfmt", "log formatter, available values are logfmt and json")
@@ -66,20 +58,26 @@ func main() {
 
 	pflag.Parse()
 
+	// setup viper
 	replacer := strings.NewReplacer("-", "_")
 	viper.SetEnvKeyReplacer(replacer)
 	viper.AutomaticEnv()
 	err := viper.BindPFlags(pflag.CommandLine)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not parse flags")
+		panic(err)
 	}
 
 	// setup logging
 	logger.InitLog(viper.GetString("log-level"), viper.GetString("log-formatter"), viper.GetBool("log-method"))
 
+	defer func() {
+		if err := recover(); err != nil {
+			log.Fatal().Msgf("%v", err)
+		}
+	}()
+
 	// setup telemetry
-	tracer, closer := telemetry.InitTracer("Scope checker")
-	if tracer != nil {
+	if tracer, closer := telemetry.InitTracer("Scope checker", logger.NewJaegerLogger()); tracer != nil {
 		opentracing.SetGlobalTracer(tracer)
 		defer func() {
 			_ = closer.Close()
@@ -87,8 +85,8 @@ func main() {
 	}
 
 	// setup rethinkdb connection
-	db := database.NewRethinkDbConnection(
-		database.Options{
+	rethinkDbConnection := database.NewRethinkDbConnection(
+		database.RethinkDbOptions{
 			Address:            fmt.Sprintf("%s:%d", viper.GetString("db-host"), viper.GetInt("db-port")),
 			Username:           viper.GetString("db-user"),
 			Password:           viper.GetString("db-password"),
@@ -99,32 +97,72 @@ func main() {
 			UseOpenTracing:     viper.GetBool("db-use-opentracing"),
 		},
 	)
-	if err := db.Connect(); err != nil {
+	if err := rethinkDbConnection.Connect(); err != nil {
 		panic(err)
 	}
 	defer func() {
-		_ = db.Close()
+		_ = rethinkDbConnection.Close()
 	}()
 
-	dbAdapter := database.NewDbAdapter(db)
-
-	redi, err := database.NewRedisClient(viper.GetString("redis-host"), viper.GetInt("redis-port"))
+	redisClient, err := database.NewRedisClient(viper.GetString("redis-host"), viper.GetInt("redis-port"))
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to communicate with redis")
+		panic(err)
+	}
+	defer func() {
+		_ = redisClient.Close()
+	}()
+
+	db, err := database.NewDatabase(redisClient, rethinkDbConnection, viper.GetString("redis-script-path"))
+	if err != nil {
+		panic(err)
 	}
 
-	queueAdapter := database.NewQueueAdapter(redi)
+	ctx, stop := context.WithCancel(context.Background())
 
-	done := make(chan struct{})
 	go func() {
 		signals := make(chan os.Signal, 1)
 		defer signal.Stop(signals)
 		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 		sig := <-signals
-		log.Debug().Msgf("Received signal: %s", sig)
-
-		close(done)
+		log.Info().Str("signal", sig.String()).Msg("Shutting down")
+		stop()
 	}()
 
-	start(done, dbAdapter, queueAdapter)
+	wg := new(errgroup.Group)
+
+	for _, v := range []struct {
+		name  string
+		delay time.Duration
+		fn    worker
+	}{
+		{"update-job-executions", 5 * time.Second, updateJobExecutions(db)},
+		{"ceid-timeout-queue", 1100 * time.Millisecond, crawlExecutionTimeoutQueueWorker(db)},
+		{"remuri-queue", 200 * time.Millisecond, removeUriQueueWorker(db)},
+		{"busy-queue", 50 * time.Millisecond, chgBusyQueueWorker(db)},
+		{"wait-queue", 50 * time.Millisecond, chgWaitQueueWorker(db)},
+		{"ceid-running-queue", 50 * time.Millisecond, crawlExecutionRunningQueueWorker(db)},
+	} {
+		t := v
+		log.Info().Dur("delayMs", t.delay).Msgf("Starting worker: %s", t.name)
+
+		wg.Go(func() error {
+			defer stop()
+			for {
+				// io.EOF can be returned by the go-redis driver but
+				// is to be seen as transient
+				if err := t.fn(); err != nil && !errors.Is(err, io.EOF) {
+					return fmt.Errorf("%s: %w", t.name, err)
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(t.delay):
+				}
+			}
+		})
+	}
+
+	if err := wg.Wait(); err != nil {
+		panic(err)
+	}
 }

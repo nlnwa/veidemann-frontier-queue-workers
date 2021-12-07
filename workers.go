@@ -17,75 +17,84 @@
 package main
 
 import (
-	"github.com/nlnwa/veidemann-frontier-workers/database"
-	zlog "github.com/rs/zerolog/log"
-	"sync"
-	"time"
+	"context"
+	"fmt"
+
+	"github.com/nlnwa/veidemann-frontier-queue-workers/database"
+	"github.com/rs/zerolog/log"
 )
 
-// start workers and wait for them to complete.
-func start(done <-chan struct{}, dbAdapter database.DbAdapter, redisAdapter database.QueueAdapter) {
-	wg := new(sync.WaitGroup)
-	defer wg.Wait()
+// worker is a function that may return an error.
+type worker func() error
 
-	go schedule(done, wg, time.Second, updateJobExecutions(dbAdapter, redisAdapter))
-	go schedule(done, wg, time.Second, chgQueueWorker())
-}
-
-// schedule to run fn in a loop with given delay between calls.
-func schedule(done <-chan struct{}, wg *sync.WaitGroup, delay time.Duration, fn func()) {
-	wg.Add(1)
-	defer wg.Done()
-	for {
-		fn()
-		select {
-		case <-done:
-			return
-		case <-time.After(delay):
+// chgWaitQueueWorker returns a worker that moves crawl host groups from wait to ready queue.
+func chgWaitQueueWorker(db database.Database) worker {
+	return func() error {
+		if moved, err := db.MoveWaitToReady(); err != nil {
+			return fmt.Errorf("error moving crawl host groups from wait queue to ready queue: %w", err)
+		} else if moved > 0 {
+			log.Debug().Msgf("%d crawl host group(s) is ready", moved)
 		}
+		return nil
 	}
 }
 
-func updateJobExecutions(adapter database.DbAdapter, queueAdapter database.QueueAdapter) func() {
-	log := zlog.Logger.With().Logger()
-	return func() {
-		jess, err := queueAdapter.GetJobExecutionStatuses()
-		if err != nil {
-			log.Error().Err(err).Msg("")
-			return
+// chgBusyQueueWorker returns a worker that moves crawl host groups from busy to timeout queue.
+func chgBusyQueueWorker(db database.Database) worker {
+	return func() error {
+		if moved, err := db.MoveBusyToTimeout(); err != nil {
+			return fmt.Errorf("error moving crawl host groups from busy queue to timeout queue: %w", err)
+		} else if moved > 0 {
+			log.Debug().Msgf("%d crawl host group(s) timed out", moved)
 		}
-		for _, _ = range jess {
-			// adapter.Save(jes)
+		return nil
+	}
+}
+
+// removeUriQueueWorker returns a worker that removes queued URIs.
+func removeUriQueueWorker(db database.Database) worker {
+	return func() error {
+		if removed, err := db.RemoveFromUriQueue(context.Background()); err != nil {
+			return err
+		} else if removed > 0 {
+			log.Debug().Msgf("Removed %d queued uris", removed)
 		}
+		return nil
 	}
 }
 
-func chgQueueWorker() func() {
-	return func() {
-
+// crawlExecutionRunningQueueWorker returns a worker that moves crawl executions from running to timeout queue.
+func crawlExecutionRunningQueueWorker(db database.Database) worker {
+	return func() error {
+		if moved, err := db.MoveRunningToTimeout(); err != nil {
+			return fmt.Errorf("error moving crawl executions from running to timeout queue: %w", err)
+		} else if moved > 0 {
+			log.Debug().Msgf("%d crawl execution(s) timed out", moved)
+		}
+		return nil
 	}
 }
 
-func waitQueueWorker() func() {
-	return func() {
-
+// crawlExecutionTimeoutQueueWorker returns a worker that sets desired state to ABORTED_TIMOUT on crawl executions in timeout queue.
+func crawlExecutionTimeoutQueueWorker(db database.Database) worker {
+	return func() error {
+		if timeouts, err := db.TimeoutCrawlExecutions(context.Background()); err != nil {
+			return fmt.Errorf("time out crawl executions: %w", err)
+		} else if timeouts > 0 {
+			log.Debug().Msgf("%d crawl execution(s) timed out", timeouts)
+		}
+		return nil
 	}
 }
 
-func busyQueueWorker() func() {
-	return func() {
-
-	}
-}
-
-func executionDurationWorker() func() {
-	return func() {
-
-	}
-}
-
-func crawlExecutionTimeoutWorker() func() {
-	return func() {
-
+// updateJobExecutions returns a worker that updates stats on job executions.
+func updateJobExecutions(db database.Database) worker {
+	return func() error {
+		if count, err := db.UpdateJobExecutions(context.Background()); err != nil {
+			return fmt.Errorf("failed to update job executions: %w", err)
+		} else if count > 0 {
+			log.Debug().Msgf("Updated %d job execution(s)", count)
+		}
+		return nil
 	}
 }

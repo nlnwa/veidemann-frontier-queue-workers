@@ -19,11 +19,11 @@ package database
 import (
 	"context"
 	"fmt"
-	configV1 "github.com/nlnwa/veidemann-api/go/config/v1"
+	"time"
+
 	"github.com/rs/zerolog"
 	zlog "github.com/rs/zerolog/log"
 	r "gopkg.in/rethinkdb/rethinkdb-go.v6"
-	"time"
 )
 
 // RethinkDbConnection holds the database connection
@@ -37,7 +37,7 @@ type RethinkDbConnection struct {
 	logger       zerolog.Logger
 }
 
-type Options struct {
+type RethinkDbOptions struct {
 	Username           string
 	Password           string
 	Database           string
@@ -49,7 +49,7 @@ type Options struct {
 }
 
 // NewRethinkDbConnection creates a new RethinkDbConnection object
-func NewRethinkDbConnection(opts Options) *RethinkDbConnection {
+func NewRethinkDbConnection(opts RethinkDbOptions) *RethinkDbConnection {
 	return &RethinkDbConnection{
 		connectOpts: r.ConnectOpts{
 			Address:        opts.Address,
@@ -90,22 +90,6 @@ func (c *RethinkDbConnection) Close() error {
 	return c.session.(*r.Session).Close()
 }
 
-// GetConfigObject fetches a config.ConfigObject referenced by a config.ConfigRef
-func (c *RethinkDbConnection) GetConfigObject(ctx context.Context, ref *configV1.ConfigRef) (*configV1.ConfigObject, error) {
-	term := r.Table("config").Get(ref.Id)
-	res, err := c.execRead(ctx, "get-config-object", &term)
-	if err != nil {
-		return nil, err
-	}
-	var result configV1.ConfigObject
-	err = res.One(&result)
-	if err != nil {
-		return nil, err
-	}
-
-	return &result, nil
-}
-
 // execRead executes the given read term with a timeout
 func (c *RethinkDbConnection) execRead(ctx context.Context, name string, term *r.Term) (*r.Cursor, error) {
 	q := func(ctx context.Context) (*r.Cursor, error) {
@@ -118,17 +102,17 @@ func (c *RethinkDbConnection) execRead(ctx context.Context, name string, term *r
 }
 
 // execWrite executes the given write term with a timeout
-func (c *RethinkDbConnection) execWrite(ctx context.Context, name string, term *r.Term) error {
+func (c *RethinkDbConnection) execWrite(ctx context.Context, name string, term *r.Term) (writeResponse r.WriteResponse, err error) {
 	q := func(ctx context.Context) (*r.Cursor, error) {
 		runOpts := r.RunOpts{
 			Context:    ctx,
 			Durability: "soft",
 		}
-		_, err := (*term).RunWrite(c.session, runOpts)
+		writeResponse, err = (*term).RunWrite(c.session, runOpts)
 		return nil, err
 	}
-	_, err := c.execWithRetry(ctx, name, q)
-	return err
+	_, err = c.execWithRetry(ctx, name, q)
+	return
 }
 
 // execWithRetry executes given query function repeatedly until successful or max retry limit is reached
@@ -164,14 +148,14 @@ out:
 	return nil, fmt.Errorf("failed to %s after %d of %d attempts: %w", name, attempts, c.maxRetries+1, err)
 }
 
-// exec executes the given query with a timeout
+// exec the given query with a timeout
 func (c *RethinkDbConnection) exec(ctx context.Context, q func(ctx context.Context) (*r.Cursor, error)) (*r.Cursor, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 	defer cancel()
 	return q(ctx)
 }
 
-// wait waits for database to be fully up date and ready for read/write
+// wait for database to be fully up-to-date and ready for read/write
 func (c *RethinkDbConnection) wait() error {
 	waitOpts := r.WaitOpts{
 		Timeout: c.waitTimeout,

@@ -14,20 +14,29 @@
  * limitations under the License.
  */
 
-package database
+package logger
 
-type DbAdapter interface {
-	// SetJobExecutionStatus(context.Context, frontierV1.JobExecutionStatus) error
-	// SetCrawlExecutionStateAborted(context.Context, frontierV1.CrawlExecutionStatus_State) (frontierV1.CrawlExecutionStatus, error)
+import (
+	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
+	"github.com/uber/jaeger-client-go"
+)
+
+// jaegerLogger implements the jaeger.Logger interface using zerolog
+type jaegerLogger struct {
+	zerolog.Logger
 }
 
-type dbAdapter struct {
-	DbAdapter
-}
-
-func NewDbAdapter(db DbAdapter) DbAdapter {
-	return &dbAdapter{
-		DbAdapter: db,
+func NewJaegerLogger() jaeger.Logger {
+	return &jaegerLogger{
+		Logger: zlog.With().Str("component", "jaeger").Logger(),
 	}
 }
 
+func (j jaegerLogger) Error(msg string) {
+	j.Logger.Error().Msg(msg)
+}
+
+func (j *jaegerLogger) Infof(msg string, args ...interface{}) {
+	j.Logger.Info().Msgf(msg, args...)
+}
