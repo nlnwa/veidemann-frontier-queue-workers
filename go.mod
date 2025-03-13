@@ -14,7 +14,7 @@ require (
 	github.com/spf13/viper v1.8.1
 	github.com/uber/jaeger-client-go v2.29.1+incompatible
 	github.com/uber/jaeger-lib v2.4.1+incompatible // indirect
-	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/sync v0.1.0
+	golang.org/x/net v0.36.0 // indirect
+	golang.org/x/sync v0.11.0
 	gopkg.in/rethinkdb/rethinkdb-go.v6 v6.2.1
 )
