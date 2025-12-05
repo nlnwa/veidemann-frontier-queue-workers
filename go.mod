@@ -9,7 +9,7 @@ require (
 	github.com/nlnwa/veidemann-api/go v0.0.0-20211008092321-7fbcd3a6ae1a
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/rs/zerolog v1.23.0
-	github.com/sirupsen/logrus v1.8.1 // indirect
+	github.com/sirupsen/logrus v1.8.3 // indirect
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.8.1
 	github.com/uber/jaeger-client-go v2.29.1+incompatible
